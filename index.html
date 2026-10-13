@@ -1,0 +1,191 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Conferro AI</title>
+<link href="https://fonts.googleapis.com/css2?family=Atkinson+Hyperlegible:wght@400;700&display=swap" rel="stylesheet">
+<style>
+:root{--paper:#f4f6f5;--ink:#14282e;--teal:#0f5c6e;--amber:#e3a02f;--red:#a8322d;--green:#2f7d4f;--line:#cfd8d6}
+*{box-sizing:border-box}
+body{margin:0;font:16px/1.5 "Atkinson Hyperlegible",system-ui,sans-serif;background:var(--paper);color:var(--ink)}
+header{background:var(--teal);color:#fff;padding:12px 20px;display:flex;justify-content:space-between;align-items:center}
+header h1{margin:0;font-size:20px}
+main{max-width:1200px;margin:0 auto;padding:16px}
+button,input,select{font:inherit;padding:8px 12px;border:1px solid var(--line);border-radius:6px;background:#fff;color:var(--ink)}
+button{cursor:pointer;background:var(--teal);color:#fff;border-color:var(--teal)}
+button.alt{background:#fff;color:var(--teal)}
+button:focus-visible,input:focus-visible,select:focus-visible{outline:3px solid var(--amber);outline-offset:2px}
+.join{max-width:420px;margin:48px auto;display:grid;gap:12px}
+.join h2{margin:0}
+.layout{display:grid;grid-template-columns:2fr 1fr;gap:16px}
+@media(max-width:800px){.layout{grid-template-columns:1fr}}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(170px,1fr));gap:10px}
+.tile{background:#fff;border:2px solid var(--line);border-radius:8px;overflow:hidden}
+.tile .v{aspect-ratio:4/3;background:#dfe6e4;display:grid;place-items:center;font-size:13px;color:#566}
+.tile img,.tile video{width:100%;height:100%;object-fit:cover}
+.tile .m{padding:6px 8px;font-size:14px;display:flex;justify-content:space-between;gap:6px}
+.tile.confused{border-color:var(--amber)}.tile.bored{border-color:var(--red)}.tile.attentive{border-color:var(--green)}
+.panel{background:#fff;border:1px solid var(--line);border-radius:8px;padding:12px;margin-bottom:12px}
+.panel h3{margin:0 0 8px;font-size:16px}
+.feed{max-height:220px;overflow:auto;font-size:15px}
+.feed p{margin:4px 0}
+.tip{border-left:4px solid var(--amber);padding-left:8px;margin:8px 0}
+.warn{background:#fbe9e7;border:1px solid var(--red);padding:10px;border-radius:6px;margin-bottom:12px}
+.row{display:flex;gap:8px;flex-wrap:wrap;margin-top:8px}
+.hidden{display:none}
+@media(prefers-reduced-motion:no-preference){.tile{transition:border-color .3s}}
+</style>
+</head>
+<body>
+<header><h1>Conferro AI</h1><span id="who"></span></header>
+<main>
+<section id="join" class="join">
+  <h2>Join a class</h2>
+  <label>Your name <input id="name" autocomplete="name"></label>
+  <label>Room <input id="room" value="demo"></label>
+  <label>Role <select id="role"><option value="listener">Listener</option><option value="host">Host</option></select></label>
+  <button id="go">Join room</button>
+</section>
+
+<section id="app" class="hidden layout">
+  <div>
+    <div id="warn" class="warn hidden" role="alert"></div>
+    <div id="grid" class="grid"></div>
+    <div class="panel" style="margin-top:12px">
+      <h3>Chat</h3>
+      <div id="chat" class="feed"></div>
+      <div class="row"><input id="msg" placeholder="Type a message or question" style="flex:1"><button id="send">Send</button></div>
+    </div>
+  </div>
+  <aside>
+    <div id="hostTools" class="hidden">
+      <div class="panel"><h3>Teaching assistant</h3><div id="tips" class="feed"><p>Suggestions appear when many listeners look lost or bored.</p></div></div>
+      <div class="panel"><h3>Live transcript</h3>
+        <div class="row"><button id="mic">Start transcript</button><button id="sum" class="alt">Summarize class</button></div>
+        <p id="sumOut" style="white-space:pre-wrap"></p></div>
+      <div class="panel"><h3>Activity</h3><div id="alerts" class="feed"></div></div>
+    </div>
+    <div id="listenTools" class="hidden">
+      <div class="panel"><h3>Camera visibility</h3>
+        <select id="cam" aria-label="Who can see my camera">
+          <option value="self_only">Only me</option><option value="host_only">Host only</option><option value="everyone">Everyone</option>
+        </select></div>
+      <div class="panel"><h3>How are you following?</h3>
+        <div class="row">
+          <button class="alt" data-s="attentive">I follow</button>
+          <button class="alt" data-s="confused">I'm lost</button>
+          <button class="alt" data-s="bored">I'm bored</button>
+        </div>
+        <p style="font-size:13px">Face-based detection plugs into <code>estimateEngagement()</code> in this file. Self-report works without a model.</p>
+        <button id="sim" class="alt">Demo: auto-vary signal</button></div>
+    </div>
+  </aside>
+</section>
+</main>
+
+<script>
+const $ = s => document.querySelector(s);
+let ws, me, role, room, stream, muted = false, simTimer, rec;
+const tiles = {};
+
+$("#go").onclick = join;
+async function join() {
+  me = $("#name").value.trim(); room = $("#room").value.trim() || "demo"; role = $("#role").value;
+  if (!me) { $("#name").focus(); return; }
+  $("#join").classList.add("hidden"); $("#app").classList.remove("hidden");
+  $("#who").textContent = `${me} (${role}) in ${room}`;
+  $(role === "host" ? "#hostTools" : "#listenTools").classList.remove("hidden");
+  if (role === "listener") await startCamera();
+  const proto = location.protocol === "https:" ? "wss" : "ws";
+  ws = new WebSocket(`${proto}://${location.host}/ws/${encodeURIComponent(room)}/${encodeURIComponent(me)}?role=${role}`);
+  ws.onmessage = e => handle(JSON.parse(e.data));
+  ws.onclose = () => addAlert("Disconnected from the room.");
+  setInterval(sendFrame, 1000);
+}
+const out = o => ws && ws.readyState === 1 && ws.send(JSON.stringify(o));
+
+async function startCamera() {
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({ video: true });
+    const t = tile(me, true), v = document.createElement("video");
+    v.autoplay = v.muted = v.playsInline = true; v.srcObject = stream;
+    t.querySelector(".v").replaceChildren(v);
+  } catch { tile(me, true).querySelector(".v").textContent = "Camera unavailable"; }
+}
+
+function tile(name, self) {
+  if (tiles[name]) return tiles[name];
+  const d = document.createElement("div"); d.className = "tile";
+  d.innerHTML = `<div class="v">Camera hidden</div><div class="m"><span>${esc(name)}${self ? " (you)" : ""}</span><span class="st"></span></div>`;
+  $("#grid").append(d); return tiles[name] = d;
+}
+function esc(s) { return s.replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c])); }
+
+function sendFrame() {
+  if (!stream || muted) return;
+  const v = tiles[me]?.querySelector("video"); if (!v || !v.videoWidth) return;
+  const c = document.createElement("canvas"); c.width = 160; c.height = 120;
+  c.getContext("2d").drawImage(v, 0, 0, 160, 120);
+  out({ t: "frame", img: c.toDataURL("image/jpeg", 0.5) });
+}
+
+function handle(m) {
+  if (m.t === "chat") line("#chat", `<b>${esc(m.name)}:</b> ${esc(m.text)}`);
+  else if (m.t === "alert") addAlert(esc(m.text));
+  else if (m.t === "frame") {
+    if (m.name === me) return;
+    const t = tile(m.name), v = t.querySelector(".v");
+    if (m.img) { let i = v.querySelector("img"); if (!i) { i = new Image(); v.replaceChildren(i); } i.src = m.img; }
+    else v.textContent = "Camera hidden";
+    if (role === "listener" && !m.img && !tiles[m.name]?.dataset.keep) { t.remove(); delete tiles[m.name]; }
+  } else if (m.t === "roster") {
+    const names = new Set(m.roster.map(r => r.name));
+    for (const n of Object.keys(tiles)) if (!names.has(n)) { tiles[n].remove(); delete tiles[n]; }
+    m.roster.forEach(r => {
+      const t = tile(r.name);
+      t.className = "tile " + r.engagement;
+      t.querySelector(".st").textContent = `${r.engagement}${r.strikes ? " | warn " + r.strikes : ""}${r.muted ? " | muted" : ""}`;
+    });
+  } else if (m.t === "suggest") {
+    line("#tips", `<div class="tip"><b>${esc(m.stats)}</b><br>${esc(m.text)}${m.memory.length ? "<br><small>Earlier: " + esc(m.memory[0]) + "</small>" : ""}</div>`);
+  } else if (m.t === "warning") {
+    $("#warn").textContent = m.text; $("#warn").classList.remove("hidden");
+    if (m.muted) { muted = true; stream?.getTracks().forEach(t => t.enabled = false); }
+  }
+}
+const line = (sel, html) => { const f = $(sel), p = document.createElement("div"); p.innerHTML = html; f.append(p); f.scrollTop = f.scrollHeight; };
+const addAlert = html => line("#alerts", `<p>${html}</p>`);
+
+$("#send").onclick = sendMsg; $("#msg").onkeydown = e => e.key === "Enter" && sendMsg();
+function sendMsg() { const t = $("#msg").value.trim(); if (t) { out({ t: "chat", text: t }); $("#msg").value = ""; } }
+$("#cam").onchange = e => out({ t: "cam_mode", mode: e.target.value });
+document.querySelectorAll("[data-s]").forEach(b => b.onclick = () => out({ t: "engagement", state: b.dataset.s }));
+
+// Plug a face model (e.g. MediaPipe Face Landmarker) in here: return "attentive" | "confused" | "bored".
+// Send only this label, never raw expression data, and only with the listener's consent.
+function estimateEngagement(video) { return null; }
+
+$("#sim").onclick = () => {
+  if (simTimer) { clearInterval(simTimer); simTimer = null; $("#sim").textContent = "Demo: auto-vary signal"; return; }
+  $("#sim").textContent = "Stop demo";
+  const s = ["attentive", "confused", "bored"];
+  simTimer = setInterval(() => out({ t: "engagement", state: estimateEngagement(tiles[me]?.querySelector("video")) || s[Math.floor(Math.random() * 3)] }), 4000);
+};
+
+$("#mic").onclick = () => {
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!SR) { $("#mic").textContent = "Speech not supported (use Chrome)"; return; }
+  if (rec) { rec.stop(); rec = null; $("#mic").textContent = "Start transcript"; return; }
+  rec = new SR(); rec.continuous = true; rec.interimResults = false;
+  rec.onresult = e => out({ t: "transcript", text: e.results[e.results.length - 1][0].transcript });
+  rec.onend = () => rec && rec.start();
+  rec.start(); $("#mic").textContent = "Stop transcript";
+};
+$("#sum").onclick = async () => {
+  $("#sumOut").textContent = "Summarizing...";
+  $("#sumOut").textContent = (await (await fetch(`/api/summary/${encodeURIComponent(room)}`)).json()).summary;
+};
+</script>
+</body>
+</html>
